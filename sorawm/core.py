@@ -28,6 +28,7 @@ def overlay_image_on_bbox(frame: np.ndarray, overlay_img: np.ndarray, bbox: tupl
     
     The overlay image is scaled to completely cover the bbox while maintaining
     aspect ratio (aspect fill), then centered and cropped to fit exactly.
+    Handles edge cases where bbox extends beyond frame boundaries.
     
     Args:
         frame: The video frame (BGR format)
@@ -38,6 +39,14 @@ def overlay_image_on_bbox(frame: np.ndarray, overlay_img: np.ndarray, bbox: tupl
         Frame with the overlay applied
     """
     x1, y1, x2, y2 = bbox
+    frame_height, frame_width = frame.shape[:2]
+    
+    # Clamp bbox to frame boundaries
+    x1_clamped = max(0, x1)
+    y1_clamped = max(0, y1)
+    x2_clamped = min(frame_width, x2)
+    y2_clamped = min(frame_height, y2)
+    
     bbox_width = x2 - x1
     bbox_height = y2 - y1
     
@@ -66,20 +75,80 @@ def overlay_image_on_bbox(frame: np.ndarray, overlay_img: np.ndarray, bbox: tupl
     # Crop to exact bbox size
     cropped = resized[crop_y:crop_y + bbox_height, crop_x:crop_x + bbox_width]
     
+    # Calculate offsets for when bbox extends beyond frame
+    src_x1 = x1_clamped - x1
+    src_y1 = y1_clamped - y1
+    src_x2 = src_x1 + (x2_clamped - x1_clamped)
+    src_y2 = src_y1 + (y2_clamped - y1_clamped)
+    
+    # Get the portion of overlay that fits in frame
+    cropped_visible = cropped[src_y1:src_y2, src_x1:src_x2]
+    
+    if cropped_visible.size == 0:
+        return frame
+    
     # Create output frame
     result = frame.copy()
     
     if has_alpha:
         # Use alpha channel for blending
-        alpha = cropped[:, :, 3:4] / 255.0
-        bgr = cropped[:, :, :3]
-        roi = result[y1:y2, x1:x2]
-        result[y1:y2, x1:x2] = (bgr * alpha + roi * (1 - alpha)).astype(np.uint8)
+        alpha = cropped_visible[:, :, 3:4] / 255.0
+        bgr = cropped_visible[:, :, :3]
+        roi = result[y1_clamped:y2_clamped, x1_clamped:x2_clamped]
+        result[y1_clamped:y2_clamped, x1_clamped:x2_clamped] = (bgr * alpha + roi * (1 - alpha)).astype(np.uint8)
     else:
         # Direct replacement
-        result[y1:y2, x1:x2] = cropped
+        result[y1_clamped:y2_clamped, x1_clamped:x2_clamped] = cropped_visible
     
     return result
+
+
+def stabilize_bboxes(frame_bboxes: dict, threshold: int = 15) -> dict:
+    """
+    Stabilize bounding boxes to reduce jitter from imperfect detection.
+    
+    Only updates the position when the bbox center moves more than the threshold distance.
+    This prevents small detection variations from causing visible jitter.
+    
+    Args:
+        frame_bboxes: Dict mapping frame index to {"bbox": (x1, y1, x2, y2) or None}
+        threshold: Minimum distance (in pixels) the center must move to update position
+        
+    Returns:
+        Dict with stabilized bboxes
+    """
+    stabilized = {}
+    last_stable_bbox = None
+    
+    for idx in sorted(frame_bboxes.keys()):
+        current_bbox = frame_bboxes[idx]["bbox"]
+        
+        if current_bbox is None:
+            # No detection - keep last stable position if we have one
+            stabilized[idx] = {"bbox": last_stable_bbox}
+            continue
+        
+        if last_stable_bbox is None:
+            # First detection - use it
+            last_stable_bbox = current_bbox
+            stabilized[idx] = {"bbox": current_bbox}
+            continue
+        
+        # Calculate center distance
+        cx1, cy1 = (current_bbox[0] + current_bbox[2]) / 2, (current_bbox[1] + current_bbox[3]) / 2
+        lx1, ly1 = (last_stable_bbox[0] + last_stable_bbox[2]) / 2, (last_stable_bbox[1] + last_stable_bbox[3]) / 2
+        
+        distance = ((cx1 - lx1) ** 2 + (cy1 - ly1) ** 2) ** 0.5
+        
+        if distance > threshold:
+            # Significant movement - update to new position
+            last_stable_bbox = current_bbox
+            stabilized[idx] = {"bbox": current_bbox}
+        else:
+            # Small jitter - keep the stable position
+            stabilized[idx] = {"bbox": last_stable_bbox}
+    
+    return stabilized
 
 
 class SoraWM:
@@ -406,6 +475,11 @@ class SoraWM:
                             progress_callback(progress)
         elif self.cleaner_type == CleanerType.OVERLAY:
             ## 3. Overlay Strategy - place custom image on top of watermark
+            # Stabilize bboxes to reduce jitter from imperfect detection
+            stabilized_bboxes = stabilize_bboxes(frame_bboxes)
+            if not quiet:
+                logger.info("Stabilized bounding boxes to reduce jitter")
+            
             input_video_loader = VideoLoader(input_video_path)
             for idx, frame in enumerate(
                 tqdm(
@@ -415,7 +489,7 @@ class SoraWM:
                     disable=quiet,
                 )
             ):
-                bbox = frame_bboxes[idx]["bbox"]
+                bbox = stabilized_bboxes[idx]["bbox"]
                 if bbox is not None and self.overlay_image is not None:
                     cleaned_frame = overlay_image_on_bbox(frame, self.overlay_image, bbox)
                 else:
