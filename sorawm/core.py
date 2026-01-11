@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Callable
 
+import cv2
 import numpy as np
 from loguru import logger
 from tqdm import tqdm
@@ -21,15 +22,91 @@ from sorawm.configs import ENABLE_E2FGVI_HQ_TORCH_COMPILE
 VIDEO_EXTENSIONS = [".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".webm"]
 
 
+def overlay_image_on_bbox(frame: np.ndarray, overlay_img: np.ndarray, bbox: tuple) -> np.ndarray:
+    """
+    Overlay an image on top of a bounding box region using aspect-fill scaling.
+    
+    The overlay image is scaled to completely cover the bbox while maintaining
+    aspect ratio (aspect fill), then centered and cropped to fit exactly.
+    
+    Args:
+        frame: The video frame (BGR format)
+        overlay_img: The overlay image (BGR or BGRA format)
+        bbox: Tuple of (x1, y1, x2, y2) defining the region to cover
+        
+    Returns:
+        Frame with the overlay applied
+    """
+    x1, y1, x2, y2 = bbox
+    bbox_width = x2 - x1
+    bbox_height = y2 - y1
+    
+    if bbox_width <= 0 or bbox_height <= 0:
+        return frame
+    
+    # Get overlay dimensions
+    overlay_height, overlay_width = overlay_img.shape[:2]
+    has_alpha = overlay_img.shape[2] == 4 if len(overlay_img.shape) > 2 else False
+    
+    # Calculate aspect-fill scaling (scale to completely cover the bbox)
+    scale_x = bbox_width / overlay_width
+    scale_y = bbox_height / overlay_height
+    scale = max(scale_x, scale_y)  # Use max for aspect-fill (cover)
+    
+    new_width = int(overlay_width * scale)
+    new_height = int(overlay_height * scale)
+    
+    # Resize the overlay
+    resized = cv2.resize(overlay_img, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
+    
+    # Calculate crop offsets to center the overlay on the bbox
+    crop_x = (new_width - bbox_width) // 2
+    crop_y = (new_height - bbox_height) // 2
+    
+    # Crop to exact bbox size
+    cropped = resized[crop_y:crop_y + bbox_height, crop_x:crop_x + bbox_width]
+    
+    # Create output frame
+    result = frame.copy()
+    
+    if has_alpha:
+        # Use alpha channel for blending
+        alpha = cropped[:, :, 3:4] / 255.0
+        bgr = cropped[:, :, :3]
+        roi = result[y1:y2, x1:x2]
+        result[y1:y2, x1:x2] = (bgr * alpha + roi * (1 - alpha)).astype(np.uint8)
+    else:
+        # Direct replacement
+        result[y1:y2, x1:x2] = cropped
+    
+    return result
+
+
 class SoraWM:
     def __init__(
         self,
         cleaner_type: CleanerType = CleanerType.LAMA,
         enable_torch_compile=ENABLE_E2FGVI_HQ_TORCH_COMPILE,
+        overlay_image_path: Path | None = None,
     ):
         self.detector = SoraWaterMarkDetector()
-        self.cleaner = WaterMarkCleaner(cleaner_type, enable_torch_compile)
         self.cleaner_type = cleaner_type
+        self.overlay_image = None
+        
+        # For overlay mode, load the overlay image; no cleaner model needed
+        if cleaner_type == CleanerType.OVERLAY:
+            if overlay_image_path is None:
+                raise ValueError("overlay_image_path is required when using CleanerType.OVERLAY")
+            if not overlay_image_path.exists():
+                raise FileNotFoundError(f"Overlay image not found: {overlay_image_path}")
+            # Load with alpha channel if present (IMREAD_UNCHANGED)
+            self.overlay_image = cv2.imread(str(overlay_image_path), cv2.IMREAD_UNCHANGED)
+            if self.overlay_image is None:
+                raise ValueError(f"Failed to load overlay image: {overlay_image_path}")
+            logger.info(f"Loaded overlay image: {overlay_image_path} ({self.overlay_image.shape})")
+            self.cleaner = None
+        else:
+            self.cleaner = WaterMarkCleaner(cleaner_type, enable_torch_compile)
 
     def run_batch(
         self,
@@ -327,6 +404,28 @@ class SoraWM:
                         if progress_callback and frame_counter % 10 == 0:
                             progress = 50 + int((frame_counter / total_frames) * 45)
                             progress_callback(progress)
+        elif self.cleaner_type == CleanerType.OVERLAY:
+            ## 3. Overlay Strategy - place custom image on top of watermark
+            input_video_loader = VideoLoader(input_video_path)
+            for idx, frame in enumerate(
+                tqdm(
+                    input_video_loader,
+                    total=total_frames,
+                    desc="Overlay watermark",
+                    disable=quiet,
+                )
+            ):
+                bbox = frame_bboxes[idx]["bbox"]
+                if bbox is not None and self.overlay_image is not None:
+                    cleaned_frame = overlay_image_on_bbox(frame, self.overlay_image, bbox)
+                else:
+                    cleaned_frame = frame
+                process_out.stdin.write(cleaned_frame.tobytes())
+
+                # 50% - 95%
+                if progress_callback and idx % 10 == 0:
+                    progress = 50 + int((idx / total_frames) * 45)
+                    progress_callback(progress)
 
         process_out.stdin.close()
         process_out.wait()
