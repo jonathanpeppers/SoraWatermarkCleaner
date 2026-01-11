@@ -24,10 +24,11 @@ VIDEO_EXTENSIONS = [".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".webm"]
 
 def overlay_image_on_bbox(frame: np.ndarray, overlay_img: np.ndarray, bbox: tuple) -> np.ndarray:
     """
-    Overlay an image on top of a bounding box region using aspect-fill scaling.
+    Overlay an image on top of a bounding box region using aspect-fit scaling.
     
-    The overlay image is scaled to completely cover the bbox while maintaining
-    aspect ratio (aspect fill), then centered and cropped to fit exactly.
+    The overlay image is scaled to fit entirely within the bbox while maintaining
+    aspect ratio (aspect fit), then centered within the bbox region.
+    The original video shows through any uncovered areas.
     Handles edge cases where bbox extends beyond frame boundaries.
     
     Args:
@@ -57,10 +58,10 @@ def overlay_image_on_bbox(frame: np.ndarray, overlay_img: np.ndarray, bbox: tupl
     overlay_height, overlay_width = overlay_img.shape[:2]
     has_alpha = overlay_img.shape[2] == 4 if len(overlay_img.shape) > 2 else False
     
-    # Calculate aspect-fill scaling (scale to completely cover the bbox)
+    # Calculate aspect-fit scaling (scale to fit entirely within the bbox)
     scale_x = bbox_width / overlay_width
     scale_y = bbox_height / overlay_height
-    scale = max(scale_x, scale_y)  # Use max for aspect-fill (cover)
+    scale = min(scale_x, scale_y)  # Use min for aspect-fit (contain)
     
     new_width = int(overlay_width * scale)
     new_height = int(overlay_height * scale)
@@ -68,23 +69,32 @@ def overlay_image_on_bbox(frame: np.ndarray, overlay_img: np.ndarray, bbox: tupl
     # Resize the overlay
     resized = cv2.resize(overlay_img, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
     
-    # Calculate crop offsets to center the overlay on the bbox
-    crop_x = (new_width - bbox_width) // 2
-    crop_y = (new_height - bbox_height) // 2
+    # Calculate offsets to center the overlay within the bbox
+    offset_x = (bbox_width - new_width) // 2
+    offset_y = (bbox_height - new_height) // 2
     
-    # Crop to exact bbox size
-    cropped = resized[crop_y:crop_y + bbox_height, crop_x:crop_x + bbox_width]
+    # Calculate where to place the overlay in frame coordinates
+    place_x1 = x1 + offset_x
+    place_y1 = y1 + offset_y
+    place_x2 = place_x1 + new_width
+    place_y2 = place_y1 + new_height
     
-    # Calculate offsets for when bbox extends beyond frame
-    src_x1 = x1_clamped - x1
-    src_y1 = y1_clamped - y1
-    src_x2 = src_x1 + (x2_clamped - x1_clamped)
-    src_y2 = src_y1 + (y2_clamped - y1_clamped)
+    # Clamp placement to frame boundaries
+    frame_x1 = max(0, place_x1)
+    frame_y1 = max(0, place_y1)
+    frame_x2 = min(frame_width, place_x2)
+    frame_y2 = min(frame_height, place_y2)
     
-    # Get the portion of overlay that fits in frame
-    cropped_visible = cropped[src_y1:src_y2, src_x1:src_x2]
+    # Calculate source region from resized overlay
+    src_x1 = frame_x1 - place_x1
+    src_y1 = frame_y1 - place_y1
+    src_x2 = src_x1 + (frame_x2 - frame_x1)
+    src_y2 = src_y1 + (frame_y2 - frame_y1)
     
-    if cropped_visible.size == 0:
+    # Get the visible portion of the overlay
+    overlay_visible = resized[src_y1:src_y2, src_x1:src_x2]
+    
+    if overlay_visible.size == 0:
         return frame
     
     # Create output frame
@@ -92,13 +102,13 @@ def overlay_image_on_bbox(frame: np.ndarray, overlay_img: np.ndarray, bbox: tupl
     
     if has_alpha:
         # Use alpha channel for blending
-        alpha = cropped_visible[:, :, 3:4] / 255.0
-        bgr = cropped_visible[:, :, :3]
-        roi = result[y1_clamped:y2_clamped, x1_clamped:x2_clamped]
-        result[y1_clamped:y2_clamped, x1_clamped:x2_clamped] = (bgr * alpha + roi * (1 - alpha)).astype(np.uint8)
+        alpha = overlay_visible[:, :, 3:4] / 255.0
+        bgr = overlay_visible[:, :, :3]
+        roi = result[frame_y1:frame_y2, frame_x1:frame_x2]
+        result[frame_y1:frame_y2, frame_x1:frame_x2] = (bgr * alpha + roi * (1 - alpha)).astype(np.uint8)
     else:
         # Direct replacement
-        result[y1_clamped:y2_clamped, x1_clamped:x2_clamped] = cropped_visible
+        result[frame_y1:frame_y2, frame_x1:frame_x2] = overlay_visible
     
     return result
 
