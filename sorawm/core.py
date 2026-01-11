@@ -24,12 +24,11 @@ VIDEO_EXTENSIONS = [".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".webm"]
 
 def overlay_image_on_bbox(frame: np.ndarray, overlay_img: np.ndarray, bbox: tuple) -> np.ndarray:
     """
-    Overlay an image on top of a bounding box region using aspect-fit scaling.
+    Overlay an image on top of a bounding box region using aspect-fill scaling.
     
-    The overlay image is scaled to fit entirely within the bbox while maintaining
-    aspect ratio (aspect fit), then centered within the bbox region.
-    The original video shows through any uncovered areas.
-    Handles edge cases where bbox extends beyond frame boundaries.
+    The overlay image is scaled to completely cover the bbox while maintaining
+    aspect ratio (aspect fill), then centered on the bbox. The full overlay is
+    drawn (extending beyond the bbox if needed) to ensure complete coverage.
     
     Args:
         frame: The video frame (BGR format)
@@ -42,12 +41,6 @@ def overlay_image_on_bbox(frame: np.ndarray, overlay_img: np.ndarray, bbox: tupl
     x1, y1, x2, y2 = bbox
     frame_height, frame_width = frame.shape[:2]
     
-    # Clamp bbox to frame boundaries
-    x1_clamped = max(0, x1)
-    y1_clamped = max(0, y1)
-    x2_clamped = min(frame_width, x2)
-    y2_clamped = min(frame_height, y2)
-    
     bbox_width = x2 - x1
     bbox_height = y2 - y1
     
@@ -58,10 +51,10 @@ def overlay_image_on_bbox(frame: np.ndarray, overlay_img: np.ndarray, bbox: tupl
     overlay_height, overlay_width = overlay_img.shape[:2]
     has_alpha = overlay_img.shape[2] == 4 if len(overlay_img.shape) > 2 else False
     
-    # Calculate aspect-fit scaling (scale to fit entirely within the bbox)
+    # Calculate aspect-fill scaling (scale to completely cover the bbox)
     scale_x = bbox_width / overlay_width
     scale_y = bbox_height / overlay_height
-    scale = min(scale_x, scale_y)  # Use min for aspect-fit (contain)
+    scale = max(scale_x, scale_y)  # Use max for aspect-fill (cover)
     
     new_width = int(overlay_width * scale)
     new_height = int(overlay_height * scale)
@@ -69,13 +62,13 @@ def overlay_image_on_bbox(frame: np.ndarray, overlay_img: np.ndarray, bbox: tupl
     # Resize the overlay
     resized = cv2.resize(overlay_img, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
     
-    # Calculate offsets to center the overlay within the bbox
-    offset_x = (bbox_width - new_width) // 2
-    offset_y = (bbox_height - new_height) // 2
+    # Calculate offsets to center the full overlay on the bbox center
+    bbox_center_x = (x1 + x2) // 2
+    bbox_center_y = (y1 + y2) // 2
     
-    # Calculate where to place the overlay in frame coordinates
-    place_x1 = x1 + offset_x
-    place_y1 = y1 + offset_y
+    # Position overlay so its center aligns with bbox center
+    place_x1 = bbox_center_x - new_width // 2
+    place_y1 = bbox_center_y - new_height // 2
     place_x2 = place_x1 + new_width
     place_y2 = place_y1 + new_height
     
