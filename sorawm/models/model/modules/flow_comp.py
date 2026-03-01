@@ -2,8 +2,53 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmcv.cnn import ConvModule
-from mmcv.runner import load_checkpoint
+
+try:
+    from mmcv.cnn import ConvModule
+    from mmcv.runner import load_checkpoint
+except Exception:
+    from loguru import logger
+
+    logger.warning("mmcv is not available, using fallback implementations")
+
+    class ConvModule(nn.Module):
+        """Fallback for mmcv.cnn.ConvModule: Conv2d + optional norm + optional activation."""
+
+        def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                     padding=0, norm_cfg=None, act_cfg=None, **kwargs):
+            super().__init__()
+            self.conv = nn.Conv2d(in_channels, out_channels, kernel_size,
+                                 stride=stride, padding=padding)
+            self.norm = None
+            if norm_cfg is not None:
+                norm_type = norm_cfg.get("type", "BN")
+                if norm_type == "BN":
+                    self.norm = nn.BatchNorm2d(out_channels)
+            self.act = None
+            if act_cfg is not None:
+                act_type = act_cfg.get("type", "ReLU")
+                if act_type == "ReLU":
+                    self.act = nn.ReLU(inplace=True)
+                elif act_type == "LeakyReLU":
+                    self.act = nn.LeakyReLU(
+                        negative_slope=act_cfg.get("negative_slope", 0.01),
+                        inplace=True,
+                    )
+
+        def forward(self, x):
+            x = self.conv(x)
+            if self.norm is not None:
+                x = self.norm(x)
+            if self.act is not None:
+                x = self.act(x)
+            return x
+
+    def load_checkpoint(model, filename, strict=True, **kwargs):
+        """Fallback for mmcv.runner.load_checkpoint."""
+        checkpoint = torch.load(filename, map_location="cpu", weights_only=False)
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        model.load_state_dict(state_dict, strict=strict)
+
 from sorawm.configs import PHY_NET_CHECKPOINT_PATH, PHY_NET_CHECKPOINT_REMOTE_URL
 from sorawm.utils.download_utils import ensure_model_downloaded
 

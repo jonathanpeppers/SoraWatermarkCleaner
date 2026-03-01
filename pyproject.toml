@@ -18,7 +18,6 @@ dependencies = [
     "jupyter>=1.1.1",
     "loguru>=0.7.3",
     "matplotlib>=3.10.6",
-    "mmcv-full>=1.7.2",
     "notebook>=7.4.7",
     "omegaconf>=2.3.0",
     "opencv-python>=4.12.0.88",
@@ -39,6 +38,10 @@ dependencies = [
     "uuid>=1.30",
     "uvicorn>=0.35.0",
 ]
+
+# mmcv-full>=1.7.2 is required for E2FGVI_HQ cleaner mode but excluded from
+# default deps because it fails to build on Python 3.12+ (missing pkg_resources).
+# Install manually if needed: uv pip install mmcv-full>=1.7.2
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
